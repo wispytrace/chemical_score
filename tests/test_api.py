@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from chemical_score.web import app
+from app import app
 
 client = TestClient(app)
 
@@ -28,9 +28,17 @@ def test_single_evaluation_endpoint():
 def test_invalid_smiles_returns_422():
     response = client.post(
         "/v1/evaluations",
-        json={"reactants_smiles": "invalid", "product_smiles": "CCO"},
+        json={"reaction_smiles": "invalid>>CCO"},
     )
     assert response.status_code == 422
+
+
+def test_http_schema_only_exposes_reaction_smiles():
+    schema = client.get("/openapi.json").json()
+    request_schema = schema["components"]["schemas"]["EvaluationRequest"]
+
+    assert request_schema["required"] == ["reaction_smiles"]
+    assert set(request_schema["properties"]) == {"reaction_smiles"}
 
 
 def test_batch_keeps_item_level_errors():

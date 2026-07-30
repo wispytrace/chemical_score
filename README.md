@@ -122,21 +122,27 @@ result = evaluate_reaction(
 ## HTTP API
 
 ```bash
-uvicorn chemical_score.web:app --host 0.0.0.0 --port 8000
+python app.py
+```
+
+也可以通过 Uvicorn 启动：
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 HTTP 服务可通过环境变量加载证据库：
 
 ```bash
 CHEMICAL_SCORE_EVIDENCE_PATH=data/reactions.jsonl \
-  uvicorn chemical_score.web:app --host 0.0.0.0 --port 8000
+  uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 PowerShell：
 
 ```powershell
 $env:CHEMICAL_SCORE_EVIDENCE_PATH = "data/reactions.jsonl"
-uvicorn chemical_score.web:app --host 0.0.0.0 --port 8000
+python app.py
 ```
 
 评分：
@@ -146,6 +152,9 @@ curl -X POST http://127.0.0.1:8000/v1/evaluations \
   -H "Content-Type: application/json" \
   -d '{"reaction_smiles":"CC(=O)O.CCO>>CCOC(C)=O"}'
 ```
+
+HTTP 评分接口只需要一个必填字段 `reaction_smiles`。无试剂时使用
+`反应物>>产物`，有单独试剂时使用 `反应物>试剂>产物`。
 
 接口列表：
 
