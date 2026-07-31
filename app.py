@@ -1,7 +1,7 @@
 """FastAPI entry point for the chemical reaction scoring service.
 
 Start from the project root with either ``python app.py`` or
-``uvicorn app:app --host 0.0.0.0 --port 8000``.
+``uvicorn app:app --host 0.0.0.0 --port 9528``.
 """
 
 from __future__ import annotations
