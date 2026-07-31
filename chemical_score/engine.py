@@ -40,10 +40,12 @@ DIMENSIONS = (
 
 GROUPS = {
     "feasibility": (
-        NodeConfig("conservation", "组成守恒", 0.30, "产物元素是否有明确来源"),
+        NodeConfig("conservation", "组成守恒", 0.30, "产物元素与原子是否有明确来源"),
         NodeConfig("consistency", "反应一致性", 0.20, "排除恒等、伪转化和异常碎片"),
-        NodeConfig("structure", "结构与转化", 0.30, "骨架、官能团及前体支持"),
-        NodeConfig("selectivity", "选择性与变化幅度", 0.20, "环、手性和描述符变化"),
+        NodeConfig("structure", "结构与转化", 0.30, "骨架、官能团、前体及映射键变化"),
+        NodeConfig(
+            "selectivity", "选择性与变化幅度", 0.20, "环、手性、描述符和位点竞争"
+        ),
     ),
     "safety": (
         NodeConfig("structural_hazards", "结构风险", 0.60, "高能或敏感结构警报"),
@@ -55,8 +57,10 @@ GROUPS = {
         NodeConfig("outcomes", "历史结果", 0.20, "相似先例的收率或成功标签支持"),
     ),
     "economy": (
-        NodeConfig("material_efficiency", "物料效率", 0.60, "原子与碳保留效率"),
-        NodeConfig("synthesis_strategy", "合成策略", 0.40, "前体复杂度和保护基负担"),
+        NodeConfig("material_efficiency", "物料效率", 0.60, "质量、碳和重原子保留效率"),
+        NodeConfig(
+            "synthesis_strategy", "合成策略", 0.40, "产物可及性、复杂度增益和保护基负担"
+        ),
     ),
 }
 
@@ -114,6 +118,7 @@ class ReactionEvaluator:
 
         leaves: dict[tuple[str, str], list[ScoreNode]] = {}
         metric_errors: list[str] = []
+        metric_statuses: list[tuple[str, MetricStatus]] = []
         for metric in self.registry.metrics:
             metric_started = perf_counter()
             try:
@@ -142,6 +147,7 @@ class ReactionEvaluator:
                 duration_ms=(perf_counter() - metric_started) * 1000.0,
             )
             leaves.setdefault(metric.spec.path, []).append(leaf)
+            metric_statuses.append((metric.spec.path[0], outcome.status))
 
         dimension_nodes: list[ScoreNode] = []
         for dimension in DIMENSIONS:
@@ -193,6 +199,55 @@ class ReactionEvaluator:
             if total_metrics
             else 0.0
         )
+        evaluated_metrics = sum(
+            status == MetricStatus.EVALUATED for _, status in metric_statuses
+        )
+        not_applicable_metrics = sum(
+            status == MetricStatus.NOT_APPLICABLE for _, status in metric_statuses
+        )
+        non_error_metrics = total_metrics - len(metric_errors)
+        core_statuses = [
+            status
+            for dimension, status in metric_statuses
+            if dimension != "evidence_support"
+        ]
+        evidence_statuses = [
+            status
+            for dimension, status in metric_statuses
+            if dimension == "evidence_support"
+        ]
+
+        def applicability(statuses: list[MetricStatus]) -> float:
+            non_errors = sum(status != MetricStatus.ERROR for status in statuses)
+            if not non_errors:
+                return 0.0
+            return (
+                sum(status == MetricStatus.EVALUATED for status in statuses)
+                / non_errors
+            )
+
+        coverage_details = {
+            "metric_counts": {
+                "total": total_metrics,
+                "evaluated": evaluated_metrics,
+                "not_applicable": not_applicable_metrics,
+                "error": len(metric_errors),
+            },
+            "execution_coverage": round(coverage, 4),
+            "applicability_coverage": round(
+                evaluated_metrics / non_error_metrics if non_error_metrics else 0.0,
+                4,
+            ),
+            "core_applicability_coverage": round(applicability(core_statuses), 4),
+            "evidence_applicability_coverage": round(
+                applicability(evidence_statuses), 4
+            ),
+            "evaluated_dimensions": [
+                node.id
+                for node in dimension_nodes
+                if node.status == MetricStatus.EVALUATED
+            ],
+        }
         reaction = context.reaction_dict()
         warnings = list(reaction.pop("warnings", []))
         if metric_errors:
@@ -208,6 +263,7 @@ class ReactionEvaluator:
             score_tree=root,
             reaction=reaction,
             coverage=coverage,
+            coverage_details=coverage_details,
             flags=flags,
             warnings=warnings,
             duration_ms=(perf_counter() - started) * 1000.0,
@@ -263,6 +319,14 @@ class ReactionEvaluator:
                 "message": "未配置历史反应证据库",
             }
         return self.evidence_index.status()
+
+    @staticmethod
+    def warm_up() -> dict[str, bool]:
+        """Preload lazy local resources used by latency-sensitive metrics."""
+
+        from chemical_score.metrics.economy import warm_up_sa_scorer
+
+        return {"sa_scorer": warm_up_sa_scorer()}
 
     @staticmethod
     def _aggregate(

@@ -17,14 +17,18 @@ def compile_smarts(smarts: str) -> Chem.Mol:
 FUNCTIONAL_GROUPS = {
     "ester": compile_smarts("[CX3](=O)[OX2][#6]"),
     "carboxylic_acid": compile_smarts("[CX3](=O)[OX2H1]"),
-    "alcohol": compile_smarts("[OX2H][#6]"),
+    "alcohol": compile_smarts("[OX2H][#6;!$([#6]=O)]"),
     "acyl_halide": compile_smarts("[CX3](=O)[Cl,Br]"),
     "amide": compile_smarts("[CX3](=O)[NX3]"),
     "amine": compile_smarts("[NX3;H2,H1;!$(NC=O)]"),
-    "ether": compile_smarts("[OD2]([#6])[#6]"),
+    "ether": compile_smarts("[OD2;!$([O][C,S,P]=O)]([#6])[#6]"),
     "aryl_halide": compile_smarts("[c][Cl,Br,I]"),
     "boronic_acid_or_ester": compile_smarts("[B]([O])[O]"),
     "sulfonate": compile_smarts("[O]S(=O)(=O)[#6]"),
+    "aldehyde_or_ketone": compile_smarts("[$([CX3H1](=O)[#6]),$([#6][CX3](=O)[#6])]"),
+    "alkene": compile_smarts("[C;!$(C=O)]=[C;!$(C=O)]"),
+    "alkyne": compile_smarts("[C]#[C]"),
+    "alkyl_halide": compile_smarts("[CX4][Cl,Br,I]"),
 }
 
 

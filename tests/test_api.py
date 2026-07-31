@@ -22,7 +22,11 @@ def test_single_evaluation_endpoint():
         json={"reaction_smiles": "CC(=O)O.CCO>>CCOC(C)=O"},
     )
     assert response.status_code == 200
-    assert response.json()["score_tree"]["type"] == "total"
+    payload = response.json()
+    assert payload["schema_version"] == "1.1"
+    assert payload["engine_version"] == "0.4.0"
+    assert payload["score_tree"]["type"] == "total"
+    assert payload["coverage_details"]["execution_coverage"] == 1
 
 
 def test_invalid_smiles_returns_422():

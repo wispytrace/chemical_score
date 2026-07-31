@@ -25,14 +25,21 @@ def test_score_is_hierarchical_and_decomposable():
     }
     assert all(node["children"] for node in root["children"])
     leaf_ids = {node["id"] for node in walk(root) if node["type"] == "metric"}
+    assert len(leaf_ids) == 30
     assert "functional_group_plausibility" in leaf_ids
     assert "atom_economy_estimate" in leaf_ids
+    assert "product_synthetic_accessibility" in leaf_ids
+    assert "synthetic_accessibility_change" in leaf_ids
+    assert "product_atom_traceability" in leaf_ids
+    assert "heavy_atom_efficiency" in leaf_ids
     assert "structural_alerts" in leaf_ids
     evidence = next(
         node for node in root["children"] if node["id"] == "evidence_support"
     )
     assert evidence["status"] == "not_applicable"
     assert evidence["effective_weight"] == 0
+    assert result["coverage_details"]["execution_coverage"] == 1
+    assert result["coverage_details"]["core_applicability_coverage"] < 1
 
 
 def test_invalid_component_is_not_silently_dropped():
@@ -126,3 +133,51 @@ def test_agent_is_included_in_structural_safety_screening():
     alerts = leaves["structural_alerts"]["evidence"]["alerts"]
 
     assert any(alert["component_role"] == "agent" for alert in alerts)
+
+
+def test_common_unmapped_transformations_are_recognized():
+    oxidation = evaluate_reaction(reaction_smiles="CCO>>CC=O")
+    substitution = evaluate_reaction(reaction_smiles="CCBr.CN>>CCNC")
+
+    oxidation_leaves = {node["id"]: node for node in walk(oxidation["score_tree"])}
+    substitution_leaves = {
+        node["id"]: node for node in walk(substitution["score_tree"])
+    }
+    assert (
+        oxidation_leaves["functional_group_plausibility"]["evidence"]["checks"][0][
+            "rule"
+        ]
+        == "alcohol_oxidation"
+    )
+    assert (
+        substitution_leaves["functional_group_plausibility"]["evidence"]["checks"][0][
+            "rule"
+        ]
+        == "alkyl_halide_substitution"
+    )
+
+
+def test_reactive_site_competition_detects_multiple_nucleophiles():
+    result = evaluate_reaction(reaction_smiles="OCCO.CC(=O)O>>CC(=O)OCCO")
+    leaves = {node["id"]: node for node in walk(result["score_tree"])}
+
+    competition = leaves["reactive_site_competition"]
+    assert competition["raw_value"] == 1
+    assert competition["score"] == 82
+
+
+def test_mapped_reaction_exposes_input_quality_and_bond_changes():
+    result = evaluate_reaction(
+        reaction_smiles=(
+            "[CH3:1][C:2](=[O:3])[OH:4].[CH3:5][CH2:6][OH:7]>>"
+            "[CH3:1][C:2](=[O:3])[O:7][CH2:6][CH3:5]"
+        )
+    )
+    leaves = {node["id"]: node for node in walk(result["score_tree"])}
+
+    mapping = result["reaction"]["input_quality"]["atom_mapping"]
+    assert mapping["present"] is True
+    assert mapping["traceable_product_fraction"] == 1
+    changes = leaves["mapped_bond_change_complexity"]
+    assert changes["raw_value"] == 2
+    assert changes["evidence"]["change_counts"] == {"broken": 1, "formed": 1}

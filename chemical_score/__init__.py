@@ -12,7 +12,7 @@ from chemical_score.context import ReactionInputError
 from chemical_score.engine import ReactionEvaluator
 from chemical_score.evidence import EvidenceIndex, EvidenceRecord
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "EvidenceIndex",

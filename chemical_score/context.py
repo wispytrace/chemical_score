@@ -155,6 +155,149 @@ class ReactionContext:
             )
         )
 
+    @cached_property
+    def mapping_analysis(self) -> dict[str, Any]:
+        """Summarize optional atom mapping and exact mapped bond changes.
+
+        Unmapped reaction SMILES remain fully valid. Mapping quality is reported
+        separately so missing metadata is never mistaken for bad chemistry.
+        """
+
+        reactant_atoms = [
+            atom
+            for molecule in self.reactant_mols
+            for atom in molecule.GetAtoms()
+            if atom.GetAtomicNum() > 1
+        ]
+        product_atoms = [
+            atom for atom in self.product_mol.GetAtoms() if atom.GetAtomicNum() > 1
+        ]
+        reactant_maps = Counter(
+            atom.GetAtomMapNum() for atom in reactant_atoms if atom.GetAtomMapNum() > 0
+        )
+        product_maps = Counter(
+            atom.GetAtomMapNum() for atom in product_atoms if atom.GetAtomMapNum() > 0
+        )
+        present = bool(reactant_maps or product_maps)
+        duplicate_maps = sorted(
+            map_number
+            for map_number, count in (reactant_maps + product_maps).items()
+            if reactant_maps[map_number] > 1 or product_maps[map_number] > 1
+        )
+        reactant_map_set = set(reactant_maps)
+        product_map_set = set(product_maps)
+        reactant_elements = {
+            atom.GetAtomMapNum(): atom.GetSymbol()
+            for atom in reactant_atoms
+            if atom.GetAtomMapNum() > 0 and reactant_maps[atom.GetAtomMapNum()] == 1
+        }
+        product_elements = {
+            atom.GetAtomMapNum(): atom.GetSymbol()
+            for atom in product_atoms
+            if atom.GetAtomMapNum() > 0 and product_maps[atom.GetAtomMapNum()] == 1
+        }
+        element_mismatches = [
+            {
+                "map_number": map_number,
+                "reactant_element": reactant_elements[map_number],
+                "product_element": product_elements[map_number],
+            }
+            for map_number in sorted(reactant_map_set & product_map_set)
+            if map_number in reactant_elements
+            and map_number in product_elements
+            and reactant_elements[map_number] != product_elements[map_number]
+        ]
+        traceable_product_atoms = sum(
+            1
+            for atom in product_atoms
+            if atom.GetAtomMapNum() > 0
+            and atom.GetAtomMapNum() in reactant_map_set
+            and reactant_maps[atom.GetAtomMapNum()] == 1
+        )
+        result: dict[str, Any] = {
+            "present": present,
+            "reactant_coverage": (
+                len(reactant_maps) / len(reactant_atoms) if reactant_atoms else 0.0
+            ),
+            "product_coverage": (
+                len(product_maps) / len(product_atoms) if product_atoms else 0.0
+            ),
+            "traceable_product_fraction": (
+                traceable_product_atoms / len(product_atoms) if product_atoms else 0.0
+            ),
+            "duplicate_map_numbers": duplicate_maps,
+            "element_mismatches": element_mismatches,
+            "product_maps_missing_from_reactants": sorted(
+                product_map_set - reactant_map_set
+            ),
+            "bond_changes": None,
+        }
+        if not present or duplicate_maps or element_mismatches:
+            return result
+
+        def mapped_bonds(molecules: list[Chem.Mol]):
+            bonds: dict[tuple[int, int], tuple[float, str]] = {}
+            for molecule in molecules:
+                for bond in molecule.GetBonds():
+                    begin_atom = bond.GetBeginAtom()
+                    end_atom = bond.GetEndAtom()
+                    begin = begin_atom.GetAtomMapNum()
+                    end = end_atom.GetAtomMapNum()
+                    if (
+                        begin <= 0
+                        or end <= 0
+                        or begin_atom.GetAtomicNum() <= 1
+                        or end_atom.GetAtomicNum() <= 1
+                    ):
+                        continue
+                    elements = "-".join(
+                        sorted((begin_atom.GetSymbol(), end_atom.GetSymbol()))
+                    )
+                    bonds[tuple(sorted((begin, end)))] = (
+                        float(bond.GetBondTypeAsDouble()),
+                        elements,
+                    )
+            return bonds
+
+        before = mapped_bonds(self.reactant_mols)
+        after = mapped_bonds([self.product_mol])
+        changes: list[dict[str, Any]] = []
+        for atom_pair in sorted(set(before) | set(after)):
+            left = before.get(atom_pair)
+            right = after.get(atom_pair)
+            if left is None and right is not None:
+                changes.append(
+                    {
+                        "type": "formed",
+                        "atom_maps": list(atom_pair),
+                        "elements": right[1],
+                        "before_order": None,
+                        "after_order": right[0],
+                    }
+                )
+            elif left is not None and right is None:
+                changes.append(
+                    {
+                        "type": "broken",
+                        "atom_maps": list(atom_pair),
+                        "elements": left[1],
+                        "before_order": left[0],
+                        "after_order": None,
+                    }
+                )
+            elif left is not None and right is not None and left[0] != right[0]:
+                changes.append(
+                    {
+                        "type": "order_changed",
+                        "atom_maps": list(atom_pair),
+                        "elements": left[1],
+                        "before_order": left[0],
+                        "after_order": right[0],
+                    }
+                )
+        result["bond_changes"] = changes
+        return result
+
     def fingerprint(self, molecule: Chem.Mol):
         key = id(molecule)
         if key not in self._fingerprints:
@@ -205,5 +348,15 @@ class ReactionContext:
             "product_smiles": ".".join(self.canonical_products),
             "main_reactant_smiles": self.canonical_main_reactant,
             "main_product_smiles": self.canonical_main_product,
+            "input_quality": {
+                "atom_mapping": {
+                    key: value
+                    for key, value in self.mapping_analysis.items()
+                    if key != "bond_changes"
+                },
+                "reactant_component_count": len(self.reactant_mols),
+                "product_component_count": len(self.product_mols),
+                "agents_separated": bool(self.agent_mols),
+            },
             "warnings": warnings,
         }

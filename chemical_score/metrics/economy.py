@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from threading import Lock
 
 from rdkit.Chem import Descriptors, RDConfig
 
@@ -26,6 +27,37 @@ def _load_sa_scorer():
 
 
 SA_SCORER = _load_sa_scorer()
+_SA_WARMUP_LOCK = Lock()
+_SA_READY = False
+
+
+def warm_up_sa_scorer() -> bool:
+    """Load SA fragment data before the first latency-sensitive evaluation."""
+
+    global _SA_READY
+    if SA_SCORER is None:
+        return False
+    if _SA_READY:
+        return True
+    with _SA_WARMUP_LOCK:
+        if _SA_READY:
+            return True
+        from rdkit import Chem
+
+        molecule = Chem.MolFromSmiles("CC")
+        assert molecule is not None
+        SA_SCORER.calculateScore(molecule)
+        _SA_READY = True
+    return True
+
+
+def _sa_score(context: ReactionContext, molecule) -> float:
+    warm_up_sa_scorer()
+    return float(
+        context.memoize(
+            f"sa_score:{id(molecule)}", lambda: SA_SCORER.calculateScore(molecule)
+        )
+    )
 
 
 class AtomEconomyEstimate:
@@ -88,27 +120,89 @@ class CarbonEfficiency:
         )
 
 
-class SyntheticAccessibilityChange:
+class HeavyAtomEfficiency:
     spec = MetricSpec(
-        "synthetic_accessibility_change",
-        "合成可及性变化",
-        "比较最复杂前体与主产物的 RDKit SA Score；逆合成前体更简单时得分更高。",
+        "heavy_atom_efficiency",
+        "重原子物料保留率",
+        "按元素计算主产物可追溯重原子与全部反应物重原子之比。",
+        ("economy", "material_efficiency"),
+        0.8,
+    )
+
+    def evaluate(self, context: ReactionContext) -> MetricOutcome:
+        reactant_counts = {
+            element: count
+            for element, count in context.reactant_atom_counts.items()
+            if element != "H"
+        }
+        product_counts = {
+            element: count
+            for element, count in context.product_atom_counts.items()
+            if element != "H"
+        }
+        reactant_total = sum(reactant_counts.values())
+        if reactant_total <= 0:
+            return MetricOutcome.not_applicable("反应物没有可统计的重原子")
+        retained = sum(
+            min(count, reactant_counts.get(element, 0))
+            for element, count in product_counts.items()
+        )
+        ratio = retained / reactant_total
+        return MetricOutcome(
+            score=100.0 * ratio,
+            raw_value=ratio,
+            unit="fraction",
+            evidence={
+                "retained_product_heavy_atoms": retained,
+                "reactant_heavy_atoms": reactant_total,
+                "estimated_unretained_heavy_atoms": reactant_total - retained,
+            },
+            warnings=["该指标不能区分催化剂、过量试剂和真实化学计量数"],
+        )
+
+
+class ProductSyntheticAccessibility:
+    spec = MetricSpec(
+        "product_synthetic_accessibility",
+        "产物合成可及性",
+        "将 RDKit SA Score（约 1 易、10 难）转换为 0–100 的易合成分数。",
         ("economy", "synthesis_strategy"),
-        1.0,
+        0.8,
     )
 
     def evaluate(self, context: ReactionContext) -> MetricOutcome:
         if SA_SCORER is None:
             return MetricOutcome.not_applicable("当前 RDKit 安装不包含 SA_Score")
-        product_sa = float(SA_SCORER.calculateScore(context.product_mol))
+        product_sa = _sa_score(context, context.product_mol)
+        return MetricOutcome(
+            score=clamp_score((10.0 - product_sa) / 9.0 * 100.0),
+            raw_value=product_sa,
+            unit="sa_score",
+            evidence={"product_sa_score": round(product_sa, 4)},
+            warnings=["SA Score 是分子层面的合成难度启发式，不是该反应的成功率"],
+        )
+
+
+class SyntheticAccessibilityChange:
+    spec = MetricSpec(
+        "synthetic_accessibility_change",
+        "单步合成复杂度增益",
+        "比较主产物与最难前体的 RDKit SA Score；由简单前体构建复杂产物时提高。",
+        ("economy", "synthesis_strategy"),
+        0.6,
+    )
+
+    def evaluate(self, context: ReactionContext) -> MetricOutcome:
+        if SA_SCORER is None:
+            return MetricOutcome.not_applicable("当前 RDKit 安装不包含 SA_Score")
+        product_sa = _sa_score(context, context.product_mol)
         reactant_scores = [
-            float(SA_SCORER.calculateScore(molecule))
-            for molecule in context.reactant_mols
+            _sa_score(context, molecule) for molecule in context.reactant_mols
         ]
         hardest_precursor = max(reactant_scores)
         improvement = product_sa - hardest_precursor
         return MetricOutcome(
-            score=clamp_score(50.0 + improvement * 12.0),
+            score=clamp_score(75.0 + improvement * (10.0 if improvement >= 0 else 6.0)),
             raw_value=improvement,
             unit="sa_score_improvement",
             evidence={
@@ -166,6 +260,8 @@ class ProtectingGroupBurden:
 DEFAULT_ECONOMY_METRICS = (
     AtomEconomyEstimate(),
     CarbonEfficiency(),
+    HeavyAtomEfficiency(),
+    ProductSyntheticAccessibility(),
     SyntheticAccessibilityChange(),
     ProtectingGroupBurden(),
 )

@@ -6,6 +6,8 @@ Start from the project root with either ``python app.py`` or
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -44,10 +46,17 @@ class BatchEvaluationRequest(BaseModel):
     concurrency: int = Field(default=1, ge=1, le=16)
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    get_default_evaluator().warm_up()
+    yield
+
+
 app = FastAPI(
     title="Chemical Score API",
     version=__version__,
     description="可解释的多维化学反应规则评分。分数不是实验成功率、产率或安全结论。",
+    lifespan=lifespan,
 )
 
 

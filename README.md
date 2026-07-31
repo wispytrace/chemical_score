@@ -2,6 +2,9 @@
 
 一个可解释、可扩展的化学反应规则评分引擎。返回结构为：
 
+完整的维度、叶子指标、公式和 JSON 数据结构见
+[SCORING_STRUCTURE.md](SCORING_STRUCTURE.md)。
+
 ```text
 综合评分
 ├── 可行性

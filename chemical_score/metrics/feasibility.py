@@ -27,6 +27,12 @@ def _reactant_match_count(context: ReactionContext, key: str) -> int:
     return sum(_count_matches(molecule, pattern) for molecule in context.reactant_mols)
 
 
+def _group_delta(context: ReactionContext, key: str) -> int:
+    return _count_matches(
+        context.product_mol, FUNCTIONAL_GROUPS[key]
+    ) - _reactant_match_count(context, key)
+
+
 class IdentityCheck:
     spec = MetricSpec(
         "identity_check",
@@ -184,6 +190,50 @@ class KeyElementConservation:
         )
 
 
+class ProductAtomTraceability:
+    spec = MetricSpec(
+        "product_atom_traceability",
+        "产物原子可追溯率",
+        "按元素统计主产物重原子能够由反应物侧提供的比例。",
+        ("feasibility", "conservation"),
+        1.2,
+    )
+
+    def evaluate(self, context: ReactionContext) -> MetricOutcome:
+        product_counts = Counter(
+            {
+                element: count
+                for element, count in context.product_atom_counts.items()
+                if element != "H"
+            }
+        )
+        product_total = sum(product_counts.values())
+        if product_total <= 0:
+            return MetricOutcome.not_applicable("主产物没有可统计的原子")
+        traced = {
+            element: min(count, context.reactant_atom_counts[element])
+            for element, count in product_counts.items()
+        }
+        missing = {
+            element: product_counts[element] - traced[element]
+            for element in traced
+            if product_counts[element] > traced[element]
+        }
+        traced_total = sum(traced.values())
+        ratio = traced_total / product_total
+        return MetricOutcome(
+            score=100.0 * ratio,
+            raw_value=ratio,
+            unit="fraction",
+            evidence={
+                "traceable_product_atoms": traced_total,
+                "product_atoms": product_total,
+                "missing_by_element": missing,
+            },
+            warnings=["部分产物原子在反应物侧没有来源"] if missing else [],
+        )
+
+
 class StructuralContinuity:
     spec = MetricSpec(
         "structural_continuity",
@@ -247,7 +297,7 @@ class FunctionalGroupPlausibility:
     spec = MetricSpec(
         "functional_group_plausibility",
         "官能团转化支持",
-        "检查新增酯、酰胺、醚和芳基偶联结构是否存在常见前体支持。",
+        "识别常见成键、氧化还原、水解和不饱和键转化，并检查前体支持。",
         ("feasibility", "structure"),
         1.2,
     )
@@ -314,6 +364,77 @@ class FunctionalGroupPlausibility:
                     "new_groups": None,
                 }
             )
+        carbonyl_delta = _group_delta(context, "aldehyde_or_ketone")
+        alcohol_delta = _group_delta(context, "alcohol")
+        ester_delta = _group_delta(context, "ester")
+        amide_delta = _group_delta(context, "amide")
+        acid_delta = _group_delta(context, "carboxylic_acid")
+        ether_delta = _group_delta(context, "ether")
+        amine_delta = _group_delta(context, "amine")
+        alkyl_halide_delta = _group_delta(context, "alkyl_halide")
+        if carbonyl_delta < 0 and alcohol_delta > 0:
+            checks.append(
+                {
+                    "rule": "carbonyl_reduction",
+                    "supported": True,
+                    "new_groups": alcohol_delta,
+                }
+            )
+        if carbonyl_delta > 0 and alcohol_delta < 0:
+            checks.append(
+                {
+                    "rule": "alcohol_oxidation",
+                    "supported": True,
+                    "new_groups": carbonyl_delta,
+                }
+            )
+        if _group_delta(context, "alkene") < 0:
+            checks.append(
+                {
+                    "rule": "alkene_consumption",
+                    "supported": True,
+                    "new_groups": None,
+                }
+            )
+        if _group_delta(context, "alkyne") < 0:
+            checks.append(
+                {
+                    "rule": "alkyne_consumption",
+                    "supported": True,
+                    "new_groups": None,
+                }
+            )
+        if ester_delta < 0 and acid_delta > 0:
+            checks.append(
+                {
+                    "rule": "ester_hydrolysis",
+                    "supported": True,
+                    "new_groups": acid_delta,
+                }
+            )
+        if amide_delta < 0 and acid_delta > 0:
+            checks.append(
+                {
+                    "rule": "amide_hydrolysis",
+                    "supported": True,
+                    "new_groups": acid_delta,
+                }
+            )
+        amine_substitution = (
+            alkyl_halide_delta < 0
+            and _reactant_match_count(context, "amine") > 0
+            and _count_matches(context.product_mol, FUNCTIONAL_GROUPS["amine"]) > 0
+        )
+        if alkyl_halide_delta < 0 and (
+            ether_delta > 0 or amine_delta > 0 or amine_substitution
+        ):
+            checks.append(
+                {
+                    "rule": "alkyl_halide_substitution",
+                    "supported": True,
+                    "new_groups": max(1, ether_delta, amine_delta),
+                }
+            )
         if not checks:
             return MetricOutcome.not_applicable("未检测到当前规则库覆盖的新增官能团")
         score = sum(95.0 if item["supported"] else 35.0 for item in checks) / len(
@@ -368,6 +489,66 @@ class LeavingGroupSupport:
             unit="supporting_groups",
             evidence={"matched_leaving_groups": dict(found)},
             warnings=["离去基启发式不能替代具体反应条件判断"],
+        )
+
+
+class MappedBondChangeComplexity:
+    spec = MetricSpec(
+        "mapped_bond_change_complexity",
+        "映射反应中心复杂度",
+        "在原子映射充分时统计成键、断键和键级变化，筛查疑似多步合并记录。",
+        ("feasibility", "structure"),
+        0.8,
+    )
+
+    def evaluate(self, context: ReactionContext) -> MetricOutcome:
+        analysis = context.mapping_analysis
+        if not analysis["present"]:
+            return MetricOutcome.not_applicable(
+                "输入没有原子映射，不启用精确反应中心指标"
+            )
+        if analysis["duplicate_map_numbers"]:
+            return MetricOutcome.not_applicable(
+                "原子映射编号存在重复，无法可靠识别反应中心",
+                evidence={"duplicate_map_numbers": analysis["duplicate_map_numbers"]},
+            )
+        if analysis["element_mismatches"]:
+            return MetricOutcome.not_applicable(
+                "相同映射编号对应不同元素，无法可靠识别反应中心",
+                evidence={"element_mismatches": analysis["element_mismatches"]},
+            )
+        if analysis["traceable_product_fraction"] < 0.8:
+            return MetricOutcome.not_applicable(
+                "可追溯的产物映射原子不足 80%，不对键变化强行评分",
+                evidence={
+                    "traceable_product_fraction": analysis["traceable_product_fraction"]
+                },
+            )
+        changes = analysis["bond_changes"]
+        if changes is None:
+            return MetricOutcome.not_applicable("无法提取映射键变化")
+        count = len(changes)
+        if count == 0:
+            score = 20.0
+        elif count <= 3:
+            score = 100.0
+        elif count == 4:
+            score = 85.0
+        elif count == 5:
+            score = 70.0
+        else:
+            score = max(20.0, 70.0 - 10.0 * (count - 5))
+        counts = Counter(change["type"] for change in changes)
+        return MetricOutcome(
+            score=score,
+            raw_value=count,
+            unit="mapped_bond_changes",
+            evidence={"change_counts": dict(counts), "changes": changes},
+            warnings=(
+                ["单条记录包含较多键变化，可能是复杂重排或多步反应合并"]
+                if count > 5
+                else []
+            ),
         )
 
 
@@ -490,18 +671,70 @@ class ChemoselectivityRisk:
         )
 
 
+class ReactiveSiteCompetition:
+    spec = MetricSpec(
+        "reactive_site_competition",
+        "反应位点竞争风险",
+        "在常见成键反应中统计多个亲核和亲电候选位点造成的选择性歧义。",
+        ("feasibility", "selectivity"),
+        0.9,
+    )
+
+    def evaluate(self, context: ReactionContext) -> MetricOutcome:
+        relevant_change = (
+            any(_group_delta(context, key) != 0 for key in ("ester", "amide", "ether"))
+            or _group_delta(context, "alkyl_halide") < 0
+        )
+        if not relevant_change:
+            return MetricOutcome.not_applicable("未识别到适合该规则判断的常见成键转化")
+        nucleophiles = {
+            "alcohol": _reactant_match_count(context, "alcohol"),
+            "amine": _reactant_match_count(context, "amine"),
+        }
+        electrophiles = {
+            "carboxylic_acid": _reactant_match_count(context, "carboxylic_acid"),
+            "acyl_halide": _reactant_match_count(context, "acyl_halide"),
+            "alkyl_halide": _reactant_match_count(context, "alkyl_halide"),
+            "aryl_halide": _reactant_match_count(context, "aryl_halide"),
+        }
+        nucleophile_count = sum(nucleophiles.values())
+        electrophile_count = sum(electrophiles.values())
+        if not nucleophile_count or not electrophile_count:
+            return MetricOutcome.not_applicable("未同时检测到常见亲核和亲电候选位点")
+        ambiguity = max(0, nucleophile_count - 1) + max(0, electrophile_count - 1)
+        return MetricOutcome(
+            score=clamp_score(100.0 - 18.0 * ambiguity),
+            raw_value=ambiguity,
+            unit="extra_competing_sites",
+            evidence={
+                "nucleophile_sites": nucleophiles,
+                "electrophile_sites": electrophiles,
+                "nucleophile_count": nucleophile_count,
+                "electrophile_count": electrophile_count,
+            },
+            warnings=(
+                ["存在多个潜在反应位点，reaction SMILES 本身无法证明区域或化学选择性"]
+                if ambiguity
+                else []
+            ),
+        )
+
+
 DEFAULT_FEASIBILITY_METRICS = (
     IdentityCheck(),
     MeaningfulChange(),
     FragmentationAndSize(),
     CoreElementConservation(),
     KeyElementConservation(),
+    ProductAtomTraceability(),
     StructuralContinuity(),
     ScaffoldContinuity(),
     FunctionalGroupPlausibility(),
     LeavingGroupSupport(),
+    MappedBondChangeComplexity(),
     RingTopologyChange(),
     StereochemistryChange(),
     DescriptorChange(),
     ChemoselectivityRisk(),
+    ReactiveSiteCompetition(),
 )

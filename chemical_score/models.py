@@ -95,12 +95,13 @@ class EvaluationResult:
     score_tree: ScoreNode | None
     reaction: dict[str, Any]
     coverage: float
+    coverage_details: dict[str, Any] = field(default_factory=dict)
     flags: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     duration_ms: float = 0.0
-    schema_version: str = "1.0"
-    engine_version: str = "0.3.0"
+    schema_version: str = "1.1"
+    engine_version: str = "0.4.0"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +110,7 @@ class EvaluationResult:
             "status": self.status,
             "score": _round(self.score),
             "coverage": _round(self.coverage),
+            "coverage_details": self.coverage_details,
             "reaction": self.reaction,
             "flags": self.flags,
             "warnings": self.warnings,
